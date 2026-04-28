@@ -1,0 +1,693 @@
+# # Параметрическое исследование эпидемиологической модели SIR
+
+# ## Активация проекта и загрузка пакетов
+using DrWatson
+@quickactivate "project"
+
+using DifferentialEquations
+using DataFrames
+using Plots
+using JLD2
+using BenchmarkTools
+using CSV
+using Statistics
+
+# ## Установка каталогов
+script_name = isempty(PROGRAM_FILE) ? "interactive" : splitext(basename(PROGRAM_FILE))[1]
+mkpath(plotsdir(script_name))
+mkpath(datadir(script_name))
+
+# ## Определение моделей
+
+# Первая система:
+# dS/dt = 0
+# dI/dt = b*I
+# dR/dt = -b*I
+function sir_case_1!(dy, y, p, t)
+    dy[1] = 0.0
+    dy[2] = p.b * y[2]
+    dy[3] = -p.b * y[2]
+end
+
+# Вторая система:
+# dS/dt = -a*S
+# dI/dt =  a*S - b*I
+# dR/dt =  b*I
+function sir_case_2!(dy, y, p, t)
+    dy[1] = -p.a * y[1]
+    dy[2] =  p.a * y[1] - p.b * y[2]
+    dy[3] =  p.b * y[2]
+end
+
+# ## Базовые параметры
+base_params = Dict(
+    :N => 11400.0,
+    :I0 => 250.0,
+    :R0 => 47.0,
+
+    :tspan => (0.0, 200.0),
+    :nt => 1000,
+
+    :model_type => :case1,     # :case1 или :case2
+
+    :a => 0.11,
+    :b => 0.02,
+
+    :solver => Tsit5(),
+    :experiment_name => "sir_base_experiment"
+)
+
+println("Базовые параметры эксперимента:")
+for (key, value) in base_params
+    println(" $key = $value")
+end
+
+# ## Функция для запуска одного эксперимента
+function run_single_experiment(params::Dict)
+    N = params[:N]
+    I0 = params[:I0]
+    R0 = params[:R0]
+    S0 = N - I0 - R0
+
+    tspan = params[:tspan]
+    nt = params[:nt]
+    model_type = params[:model_type]
+
+    a = params[:a]
+    b = params[:b]
+
+    solver = params[:solver]
+
+    u0 = [S0, I0, R0]
+    tgrid = collect(LinRange(tspan[1], tspan[2], nt))
+
+    p = (a = a, b = b)
+
+    if model_type == :case1
+        prob = ODEProblem(sir_case_1!, u0, tspan, p)
+    else
+        prob = ODEProblem(sir_case_2!, u0, tspan, p)
+    end
+
+    sol = solve(prob, solver; saveat = tgrid)
+
+    S_vals = [u[1] for u in sol.u]
+    I_vals = [u[2] for u in sol.u]
+    R_vals = [u[3] for u in sol.u]
+
+    # --- Мини-анализ ---
+    S_final = S_vals[end]
+    I_final = I_vals[end]
+    R_final = R_vals[end]
+
+    S_max = maximum(S_vals)
+    I_max = maximum(I_vals)
+    R_max = maximum(R_vals)
+
+    S_min = minimum(S_vals)
+    I_min = minimum(I_vals)
+    R_min = minimum(R_vals)
+
+    S_mean = mean(S_vals)
+    I_mean = mean(I_vals)
+    R_mean = mean(R_vals)
+
+    total_final = S_final + I_final + R_final
+    norm_final = sqrt(S_final^2 + I_final^2 + R_final^2)
+
+    return Dict(
+        "solution" => sol,
+        "t_points" => sol.t,
+
+        "S_values" => S_vals,
+        "I_values" => I_vals,
+        "R_values" => R_vals,
+
+        "S_final" => S_final,
+        "I_final" => I_final,
+        "R_final" => R_final,
+
+        "S_max" => S_max,
+        "I_max" => I_max,
+        "R_max" => R_max,
+
+        "S_min" => S_min,
+        "I_min" => I_min,
+        "R_min" => R_min,
+
+        "S_mean" => S_mean,
+        "I_mean" => I_mean,
+        "R_mean" => R_mean,
+
+        "total_final" => total_final,
+        "norm_final" => norm_final,
+
+        "parameters" => params
+    )
+end
+
+# ## Запуск базового эксперимента: первая система
+data_base, path_base = produce_or_load(
+    datadir(script_name, "single"),
+    base_params,
+    run_single_experiment;
+    prefix = "sir",
+    tag = false,
+    verbose = true
+)
+
+println("\nРезультаты базового эксперимента:")
+println(" S_final: ", data_base["S_final"])
+println(" I_final: ", data_base["I_final"])
+println(" R_final: ", data_base["R_final"])
+println(" I_max: ", data_base["I_max"])
+println(" total_final: ", data_base["total_final"])
+println(" norm_final: ", round(data_base["norm_final"]; digits = 4))
+println(" Файл результатов: ", path_base)
+
+# ## Визуализация базового эксперимента
+p1 = plot(
+    data_base["t_points"], data_base["S_values"],
+    label = "S(t) — восприимчивые",
+    xlabel = "t",
+    ylabel = "Численность",
+    title = "Базовый эксперимент: model_type=$(base_params[:model_type])",
+    lw = 2,
+    legend = :topright,
+    grid = true
+)
+
+plot!(
+    p1,
+    data_base["t_points"], data_base["I_values"],
+    label = "I(t) — инфицированные",
+    lw = 2
+)
+
+plot!(
+    p1,
+    data_base["t_points"], data_base["R_values"],
+    label = "R(t) — выбывшие",
+    lw = 2
+)
+
+savefig(p1, plotsdir(script_name, "single_experiment_case1.png"))
+
+# ## Фазовый портрет I(S)
+p2 = plot(
+    data_base["S_values"], data_base["I_values"],
+    xlabel = "S",
+    ylabel = "I",
+    label = "Фазовая траектория I(S)",
+    title = "Фазовый портрет S-I: model_type=$(base_params[:model_type])",
+    lw = 2,
+    legend = :topright,
+    grid = true
+)
+
+savefig(p2, plotsdir(script_name, "single_experiment_case1_phase_SI.png"))
+
+# ## Второй базовый эксперимент
+base_params2 = copy(base_params)
+base_params2[:model_type] = :case2
+base_params2[:experiment_name] = "sir_base_experiment_case2"
+
+data_base2, path_base2 = produce_or_load(
+    datadir(script_name, "single"),
+    base_params2,
+    run_single_experiment;
+    prefix = "sir",
+    tag = false,
+    verbose = true
+)
+
+println("\nРезультаты второго базового эксперимента:")
+println(" S_final: ", data_base2["S_final"])
+println(" I_final: ", data_base2["I_final"])
+println(" R_final: ", data_base2["R_final"])
+println(" I_max: ", data_base2["I_max"])
+println(" total_final: ", data_base2["total_final"])
+println(" norm_final: ", round(data_base2["norm_final"]; digits = 4))
+println(" Файл результатов: ", path_base2)
+
+p3 = plot(
+    data_base2["t_points"], data_base2["S_values"],
+    label = "S(t) — восприимчивые",
+    xlabel = "t",
+    ylabel = "Численность",
+    title = "Базовый эксперимент: model_type=$(base_params2[:model_type])",
+    lw = 2,
+    legend = :topright,
+    grid = true
+)
+
+plot!(
+    p3,
+    data_base2["t_points"], data_base2["I_values"],
+    label = "I(t) — инфицированные",
+    lw = 2
+)
+
+plot!(
+    p3,
+    data_base2["t_points"], data_base2["R_values"],
+    label = "R(t) — выбывшие",
+    lw = 2
+)
+
+savefig(p3, plotsdir(script_name, "single_experiment_case2.png"))
+
+p4 = plot(
+    data_base2["S_values"], data_base2["I_values"],
+    xlabel = "S",
+    ylabel = "I",
+    label = "Фазовая траектория I(S)",
+    title = "Фазовый портрет S-I: model_type=$(base_params2[:model_type])",
+    lw = 2,
+    legend = :topright,
+    grid = true
+)
+
+savefig(p4, plotsdir(script_name, "single_experiment_case2_phase_SI.png"))
+
+# ## Параметрическое сканирование
+param_grid = Dict(
+    :N => [11400.0],
+    :I0 => [250.0],
+    :R0 => [47.0],
+
+    :tspan => [(0.0, 200.0)],
+    :nt => [1000],
+
+    :model_type => [:case1, :case2],
+
+    :a => [0.05, 0.08, 0.11, 0.15],
+    :b => [0.01, 0.02, 0.03, 0.05],
+
+    :solver => [Tsit5()],
+    :experiment_name => ["sir_parametric_scan"]
+)
+
+all_params = dict_list(param_grid)
+
+println("\n" * "="^60)
+println("ПАРАМЕТРИЧЕСКОЕ СКАНИРОВАНИЕ")
+println("Всего комбинаций параметров: ", length(all_params))
+println("Исследуемые model_type: ", param_grid[:model_type])
+println("Исследуемые a: ", param_grid[:a])
+println("Исследуемые b: ", param_grid[:b])
+println("="^60)
+
+# ## Запуск всех экспериментов
+all_results = []
+all_dfs = []
+
+for (i, params) in enumerate(all_params)
+    println(
+        "Прогресс: $i/$(length(all_params)) | ",
+        "model_type=$(params[:model_type]) | ",
+        "a=$(params[:a]) | b=$(params[:b])"
+    )
+
+    data, path = produce_or_load(
+        datadir(script_name, "parametric_scan"),
+        params,
+        run_single_experiment;
+        prefix = "scan",
+        tag = false,
+        verbose = false
+    )
+
+    result_summary = merge(
+        params,
+        Dict(
+            :S_final => data["S_final"],
+            :I_final => data["I_final"],
+            :R_final => data["R_final"],
+
+            :S_max => data["S_max"],
+            :I_max => data["I_max"],
+            :R_max => data["R_max"],
+
+            :S_min => data["S_min"],
+            :I_min => data["I_min"],
+            :R_min => data["R_min"],
+
+            :S_mean => data["S_mean"],
+            :I_mean => data["I_mean"],
+            :R_mean => data["R_mean"],
+
+            :total_final => data["total_final"],
+            :norm_final => data["norm_final"],
+            :filepath => path
+        )
+    )
+
+    push!(all_results, result_summary)
+
+    df = DataFrame(
+        t = data["t_points"],
+        S = data["S_values"],
+        I = data["I_values"],
+        R = data["R_values"],
+        model_type = fill(string(params[:model_type]), length(data["t_points"])),
+        a = fill(params[:a], length(data["t_points"])),
+        b = fill(params[:b], length(data["t_points"]))
+    )
+
+    push!(all_dfs, df)
+end
+
+# ## Анализ результатов сканирования
+results_df = DataFrame(all_results)
+full_timeseries_df = vcat(all_dfs...)
+
+println("\nСводная таблица результатов:")
+println(first(results_df, 10))
+
+CSV.write(datadir(script_name, "results_summary.csv"), results_df)
+CSV.write(datadir(script_name, "timeseries_full.csv"), full_timeseries_df)
+
+# ## Сравнительный график S(t)
+p5 = plot(size = (950, 520), dpi = 150)
+
+for params in all_params
+    data, _ = produce_or_load(
+        datadir(script_name, "parametric_scan"),
+        params,
+        run_single_experiment;
+        prefix = "scan",
+        tag = false,
+        verbose = false
+    )
+
+    label_text = "$(params[:model_type]), a=$(params[:a]), b=$(params[:b])"
+
+    plot!(
+        p5,
+        data["t_points"],
+        data["S_values"],
+        label = label_text,
+        lw = 2,
+        alpha = 0.8
+    )
+end
+
+plot!(
+    p5,
+    xlabel = "t",
+    ylabel = "S(t)",
+    title = "Сканирование: траектории S(t)",
+    legend = :outerright,
+    grid = true
+)
+
+savefig(p5, plotsdir(script_name, "parametric_scan_S_comparison.png"))
+
+# ## Сравнительный график I(t)
+p6 = plot(size = (950, 520), dpi = 150)
+
+for params in all_params
+    data, _ = produce_or_load(
+        datadir(script_name, "parametric_scan"),
+        params,
+        run_single_experiment;
+        prefix = "scan",
+        tag = false,
+        verbose = false
+    )
+
+    label_text = "$(params[:model_type]), a=$(params[:a]), b=$(params[:b])"
+
+    plot!(
+        p6,
+        data["t_points"],
+        data["I_values"],
+        label = label_text,
+        lw = 2,
+        alpha = 0.8
+    )
+end
+
+plot!(
+    p6,
+    xlabel = "t",
+    ylabel = "I(t)",
+    title = "Сканирование: траектории I(t)",
+    legend = :outerright,
+    grid = true
+)
+
+savefig(p6, plotsdir(script_name, "parametric_scan_I_comparison.png"))
+
+# ## Сравнительный график R(t)
+p7 = plot(size = (950, 520), dpi = 150)
+
+for params in all_params
+    data, _ = produce_or_load(
+        datadir(script_name, "parametric_scan"),
+        params,
+        run_single_experiment;
+        prefix = "scan",
+        tag = false,
+        verbose = false
+    )
+
+    label_text = "$(params[:model_type]), a=$(params[:a]), b=$(params[:b])"
+
+    plot!(
+        p7,
+        data["t_points"],
+        data["R_values"],
+        label = label_text,
+        lw = 2,
+        alpha = 0.8
+    )
+end
+
+plot!(
+    p7,
+    xlabel = "t",
+    ylabel = "R(t)",
+    title = "Сканирование: траектории R(t)",
+    legend = :outerright,
+    grid = true
+)
+
+savefig(p7, plotsdir(script_name, "parametric_scan_R_comparison.png"))
+
+# ## Сравнительный фазовый портрет S-I
+p8 = plot(size = (950, 520), dpi = 150)
+
+for params in all_params
+    data, _ = produce_or_load(
+        datadir(script_name, "parametric_scan"),
+        params,
+        run_single_experiment;
+        prefix = "scan",
+        tag = false,
+        verbose = false
+    )
+
+    label_text = "$(params[:model_type]), a=$(params[:a]), b=$(params[:b])"
+
+    plot!(
+        p8,
+        data["S_values"],
+        data["I_values"],
+        label = label_text,
+        lw = 2,
+        alpha = 0.8
+    )
+end
+
+plot!(
+    p8,
+    xlabel = "S",
+    ylabel = "I",
+    title = "Сканирование: фазовые траектории S-I",
+    legend = :outerright,
+    grid = true
+)
+
+savefig(p8, plotsdir(script_name, "parametric_scan_phase_SI_comparison.png"))
+
+# ## График зависимости I_max от параметров
+p9 = plot(size = (900, 520), dpi = 150)
+
+case1_sub = results_df[results_df.model_type .== :case1, :]
+case2_sub = results_df[results_df.model_type .== :case2, :]
+
+if nrow(case1_sub) > 0
+    plot!(
+        p9,
+        case1_sub.b,
+        case1_sub.I_max,
+        seriestype = :scatter,
+        label = "case1: I_max от b"
+    )
+end
+
+if nrow(case2_sub) > 0
+    plot!(
+        p9,
+        case2_sub.a,
+        case2_sub.I_max,
+        seriestype = :scatter,
+        label = "case2: I_max от a"
+    )
+end
+
+plot!(
+    p9,
+    xlabel = "Параметр модели",
+    ylabel = "I_max",
+    title = "Зависимость максимального числа инфицированных от параметров",
+    legend = :topleft,
+    grid = true
+)
+
+savefig(p9, plotsdir(script_name, "I_max_vs_parameter.png"))
+
+# ## График зависимости norm_final от параметров
+p10 = plot(size = (900, 520), dpi = 150)
+
+if nrow(case1_sub) > 0
+    plot!(
+        p10,
+        case1_sub.b,
+        case1_sub.norm_final,
+        seriestype = :scatter,
+        label = "case1: norm_final от b"
+    )
+end
+
+if nrow(case2_sub) > 0
+    plot!(
+        p10,
+        case2_sub.a,
+        case2_sub.norm_final,
+        seriestype = :scatter,
+        label = "case2: norm_final от a"
+    )
+end
+
+plot!(
+    p10,
+    xlabel = "Параметр модели",
+    ylabel = "norm_final",
+    title = "Зависимость norm_final от параметров модели",
+    legend = :topleft,
+    grid = true
+)
+
+savefig(p10, plotsdir(script_name, "norm_final_vs_parameter.png"))
+
+# ## Бенчмаркинг
+println("\n" * "="^60)
+println("БЕНЧМАРКИНГ ДЛЯ РАЗНЫХ ПАРАМЕТРОВ")
+println("="^60)
+
+benchmark_results = []
+
+for params in all_params
+    function benchmark_run()
+        N = params[:N]
+        I0 = params[:I0]
+        R0 = params[:R0]
+        S0 = N - I0 - R0
+
+        u0 = [S0, I0, R0]
+        p = (a = params[:a], b = params[:b])
+
+        if params[:model_type] == :case1
+            prob = ODEProblem(sir_case_1!, u0, params[:tspan], p)
+        else
+            prob = ODEProblem(sir_case_2!, u0, params[:tspan], p)
+        end
+
+        return solve(
+            prob,
+            params[:solver];
+            saveat = LinRange(params[:tspan][1], params[:tspan][2], params[:nt])
+        )
+    end
+
+    println(
+        "\nБенчмарк для model_type=$(params[:model_type]), ",
+        "a=$(params[:a]), b=$(params[:b]):"
+    )
+
+    bmark = @benchmark $benchmark_run() samples = 80 evals = 1
+    tsec = median(bmark).time / 1e9
+
+    println(" Медианное время: ", round(tsec; digits = 6), " сек")
+
+    push!(
+        benchmark_results,
+        (
+            model_type = string(params[:model_type]),
+            a = params[:a],
+            b = params[:b],
+            time = tsec
+        )
+    )
+end
+
+bench_df = DataFrame(benchmark_results)
+CSV.write(datadir(script_name, "benchmark_results.csv"), bench_df)
+
+# ## График времени вычисления
+p11 = plot(size = (900, 520), dpi = 150)
+
+bench_case1 = bench_df[bench_df.model_type .== "case1", :]
+bench_case2 = bench_df[bench_df.model_type .== "case2", :]
+
+if nrow(bench_case1) > 0
+    plot!(
+        p11,
+        bench_case1.b,
+        bench_case1.time,
+        seriestype = :scatter,
+        label = "case1: время от b"
+    )
+end
+
+if nrow(bench_case2) > 0
+    plot!(
+        p11,
+        bench_case2.a,
+        bench_case2.time,
+        seriestype = :scatter,
+        label = "case2: время от a"
+    )
+end
+
+plot!(
+    p11,
+    xlabel = "Параметр модели",
+    ylabel = "Время вычисления, сек",
+    title = "Зависимость времени решения ODE от параметров",
+    legend = :topleft,
+    grid = true
+)
+
+savefig(p11, plotsdir(script_name, "computation_time_vs_parameter.png"))
+
+# ## Сохранение всех результатов
+@save datadir(script_name, "all_results.jld2") base_params base_params2 param_grid all_params results_df bench_df full_timeseries_df
+@save datadir(script_name, "all_plots.jld2") p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11
+
+println("\n" * "="^60)
+println("ЛАБОРАТОРНАЯ РАБОТА ЗАВЕРШЕНА")
+println("="^60)
+
+println("\nРезультаты сохранены в:")
+println(" • data/$(script_name)/single/ - базовые эксперименты")
+println(" • data/$(script_name)/parametric_scan/ - параметрическое сканирование")
+println(" • data/$(script_name)/results_summary.csv - сводная таблица")
+println(" • data/$(script_name)/timeseries_full.csv - полные временные ряды")
+println(" • data/$(script_name)/benchmark_results.csv - результаты бенчмаркинга")
+println(" • data/$(script_name)/all_results.jld2 - сводные данные")
+println(" • plots/$(script_name)/ - все графики")
+println(" • data/$(script_name)/all_plots.jld2 - объекты графиков")
